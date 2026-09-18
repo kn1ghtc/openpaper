@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """Sync leaked/official system-prompt sources into vendor-organized Markdown.
 
-Reproduces the `prompt-engineering-research/<vendor>/...` tree from two
+Reproduces the flat `prompt-engineering-research/<vendor>/...` tree from two
 upstream public repositories:
 
   - asgeirtj/system_prompts_leaks  (CC0-1.0, public domain)
   - elder-plinius/CL4R1T4S          (AGPL-3.0)
+
+We aggregate leaked/official system prompts from across the internet and only
+distinguish by model/tool vendor, never by which upstream repo supplied a
+given file -- both sources land directly under `<vendor>/...` (see
+KEEP_VENDORS below for the fixed vendor allowlist). On a genuine filename
+collision between the two sources (same vendor, same relative path, different
+content) the incoming file is disambiguated with a `.<tag>` suffix instead of
+silently overwriting.
 
 Usage (from repo root, after cloning both sources into a staging dir):
 
@@ -111,6 +119,42 @@ CL4R_TOP_SKIP = {".git", "LICENSE", "README.md"}
 BINARY_SKIP_EXT = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".xml"}
 KEEP_EXT_AS_IS = {".json", ".md"}
 
+# We aggregate leaked/official system prompts from the whole internet and only
+# distinguish by model/tool vendor -- not by which upstream repo supplied the
+# file. Vendors outside this list are intentionally out of scope and skipped
+# entirely (delete their directory locally if a prior run created one).
+KEEP_VENDORS = {
+    "anthropic", "brave", "cline", "cursor", "deepseek", "google", "meta",
+    "microsoft", "minimax", "mistral", "moonshot-kimi", "openai",
+    "perplexity", "qwen-alibaba", "reddit", "xai", "zhipu-glm",
+}
+
+
+def _files_identical(a: Path, b: Path) -> bool:
+    try:
+        return a.read_bytes() == b.read_bytes()
+    except OSError:
+        return False
+
+
+def _write_deduped(out_path: Path, content_bytes: bytes, tag: str) -> Path:
+    """Write content to out_path, disambiguating on a genuine name collision
+    between the two upstream sources (same vendor, same filename, different
+    content). Returns the path actually written."""
+    if not out_path.exists():
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(content_bytes)
+        return out_path
+    if out_path.read_bytes() == content_bytes:
+        return out_path  # already identical, nothing to do
+    candidate = out_path.with_name(f"{out_path.stem}.{tag}{out_path.suffix}")
+    counter = 2
+    while candidate.exists() and candidate.read_bytes() != content_bytes:
+        candidate = out_path.with_name(f"{out_path.stem}.{tag}-{counter}{out_path.suffix}")
+        counter += 1
+    candidate.write_bytes(content_bytes)
+    return candidate
+
 
 def to_md_name(name: str) -> str:
     """Normalize a filename so every archived prompt lands as .md, except
@@ -169,19 +213,23 @@ def copy_tree(src_root: Path, vendor_root: Path, tag: str, repo: str, repo_url: 
             else:
                 vendor_for_file = vendor
                 out_rel = f.relative_to(top)
+
+            if vendor_for_file not in KEEP_VENDORS:
+                continue
+
             out_name = to_md_name(out_rel.name)
-            out_path = vendor_root / vendor_for_file / tag / out_rel.parent / out_name
+            # Flattened layout: <vendor>/<relpath> directly, no per-source
+            # subdirectory -- we don't distinguish upstream origin in the tree.
+            out_path = vendor_root / vendor_for_file / out_rel.parent / out_name
             out_path.parent.mkdir(parents=True, exist_ok=True)
 
             text = f.read_text(encoding="utf-8", errors="replace")
             if out_path.suffix.lower() == ".json":
-                out_path.write_text(text, encoding="utf-8")
+                _write_deduped(out_path, text.encode("utf-8"), tag)
             else:
                 title = f.stem.replace("-", " ").replace("_", " ").title()
-                out_path.write_text(
-                    header(title, repo, repo_url, str(rel).replace("\\", "/"), license_, commit) + text,
-                    encoding="utf-8",
-                )
+                content = header(title, repo, repo_url, str(rel).replace("\\", "/"), license_, commit) + text
+                _write_deduped(out_path, content.encode("utf-8"), tag)
             count += 1
     return count
 
@@ -228,8 +276,8 @@ def main() -> None:
     )
     print(f"CL4R1T4S: wrote {n2} files (commit {cl4r_commit[:12]})")
 
-    print(f"Total: {n1 + n2} files across "
-          f"{len(set(SPL_TOP_MAP.values()) | set(SPL_MISC_FILE_MAP.values()) | set(CL4R_TOP_MAP.values()))} vendor dirs")
+    print(f"Total: {n1 + n2} files across {len(KEEP_VENDORS)} tracked vendor dirs "
+          "(vendors outside KEEP_VENDORS are skipped entirely)")
 
 
 if __name__ == "__main__":
